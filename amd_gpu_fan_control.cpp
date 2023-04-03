@@ -1,5 +1,9 @@
 #include <iostream>
 #include <limits>
+#include <filesystem>
+#include <fstream>
+
+namespace fs = std::filesystem;
 
 typedef signed int temp_t; // Short for temperature not temporary.
 
@@ -25,7 +29,7 @@ class arguments_t {
 		try {
 			temp_a = std::stoi(std::string(argv[1]));
 			temp_b = std::stoi(std::string(argv[2]));
-		} catch (std::exception) {
+		} catch (std::exception&) {
 			print_usage();
 			exit_code = 1;
 			return;
@@ -45,10 +49,56 @@ class arguments_t {
 	}
 };
 
+fs::path find_gpu_sysfs() {
+	fs::directory_options options = fs::directory_options::skip_permission_denied;
+	fs::recursive_directory_iterator recusive_iterator("/sys/devices", options);
+
+	for (const fs::directory_entry &entry : recusive_iterator) {
+		fs::path path = entry.path();
+		std::string name = path.filename();
+
+		if (name == "hwmon" && entry.is_directory()) {
+			// Found hwmon. Check that it is for an AMD GPU.
+			// This directory should have another directory inside it called hwmonN where N is the number of the hwmon.
+
+			// Disable recursion into this directory because we will explore it manually.
+			recusive_iterator.disable_recursion_pending();
+
+			// Get hwmonN from the found hwmon directory.
+			fs::directory_iterator hwmon(path, options);
+			// Skip if no entries.
+			if (hwmon == fs::directory_iterator()) {
+				continue;
+			}
+			
+			fs::path hwmon_path = hwmon->path();
+			std::string name_path = hwmon_path / "name";
+			std::ifstream name_file(name_path);
+			if (!name_file.is_open()) {
+				// file does not exist. Probably not the GPU.
+				continue;
+			}
+
+			std::string name;
+			name_file >> name;
+
+			if (name == "amdgpu") {
+				// Found GPU.
+				return hwmon_path;
+			}
+		}
+	}
+
+	throw std::runtime_error("Unable to find GPU");
+}
+
 int main(int argc, char** argv) {
 	// Usage: <executable> <0% temp> <100% temp>
 
 	arguments_t args = {argc, argv};
+	(void)args;
+	
+	fs::path hwmon_path = find_gpu_sysfs();
 
-	std::cout << args.min << std::endl << args.max << std::endl;
+	std::cout << hwmon_path << std::endl;
 }
