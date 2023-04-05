@@ -1,0 +1,11 @@
+[Unit]
+Description=amd_gpu_fan_control
+
+[Service]
+Type=exec
+# Environment=PRINT=true # Uncomment this line to enable GPU temp and fan speed printing. This will spam the journal, hence why it's commented out here.
+ExecStart=/usr/local/bin/amd_gpu_fan_control 40 65
+Restart=always
+
+[Install]
+WantedBy=sysinit.target
