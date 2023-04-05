@@ -5,6 +5,7 @@
 #include <thread>
 #include <chrono>
 #include <csignal>
+#include <sys/mman.h>
 
 #include "satarith.hpp"
 
@@ -34,6 +35,8 @@ class arguments_t {
 	unsigned min_temp_kelvin;
 	unsigned max_temp_kelvin;
 
+	fs::path executable;
+
 	arguments_t(int argc, char **argv) {
 		executable = std::string(argv[0]);
 
@@ -59,11 +62,12 @@ class arguments_t {
 
 	private:
 	void print_usage() {
-		std::cerr << "Usage: " << executable << R"( TEMP TEMP
+		std::cerr << "Usage: " << executable.string() << R"( TEMP TEMP
 	TEMP must be an integer in celcius between )" << std::numeric_limits<signed>::min() << " and " << std::numeric_limits<signed>::max() << R"(.
 	GPU fans will be off when GPU temp is below the lower TEMP.
 	GPU fans will be full speed when GPU temp is above the higher TEMP.
-	Fans will be proportionally controlled between those values.)" << std::endl;
+	Fans will be proportionally controlled between those values.
+	Set environment variable PRINT=true to print gpu temp and fan percentage.)" << std::endl;
 	}
 };
 
@@ -225,6 +229,9 @@ int main(int argc, char** argv) {
 		pwm: 0 to UINT8_MAX (255).
 	*/
 
+	char* cprint = std::getenv("PRINT");
+	const bool print = cprint != NULL && std::string(cprint) == "true";
+
 	const unsigned control_max = std::numeric_limits<unsigned>::max();
 
 	// Max amount to rise and fall by in each loop as a portion of control_max.
@@ -258,7 +265,9 @@ int main(int argc, char** argv) {
 
 		unsigned percentage = (pwm * 100) / pwm_max;
 
-		std::cout << mk_to_mc(temp) / 1000 << "°C " << percentage << "%" << std::endl;
+		if (print) {
+			std::cout << "GPU: " << mk_to_mc(temp) / 1000 << "°C, Fan: " << percentage << "%" << std::endl;
+		}
 
 		hwmon->set_pwm(pwm);
 
