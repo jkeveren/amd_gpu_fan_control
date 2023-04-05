@@ -6,19 +6,33 @@
 #include <chrono>
 #include <csignal>
 
+#include "satarith.hpp"
+
 namespace fs = std::filesystem;
 
-typedef signed int temp_t; // Short for temperature not temporary.
+typedef uint8_t pwm_t;
 
 std::string executable;
+
+const unsigned mc_offset = 273150; // 0°mC in mK
+
+// millicelcius to millikelvin.
+unsigned mc_to_mk(signed celcius) {
+	return celcius + mc_offset;
+}
+
+// millikelvin to millicelcius.
+signed mk_to_mc(unsigned kelvin) {
+	return kelvin - mc_offset;
+}
 
 class arguments_t {
 	public:
 	unsigned exit_code = 0; // If not 0, program should exit immediately using this code.
 
 	// Temp for 0% fan and 100% fan in millicelcius.
-	temp_t min_temp;
-	temp_t max_temp;
+	unsigned min_temp_kelvin;
+	unsigned max_temp_kelvin;
 
 	arguments_t(int argc, char **argv) {
 		executable = std::string(argv[0]);
@@ -29,24 +43,24 @@ class arguments_t {
 			return;
 		}
 
-		temp_t temp_a, temp_b;
+		unsigned temp_a, temp_b;
 		try {
-			temp_a = std::stoi(std::string(argv[1])) * 1000;
-			temp_b = std::stoi(std::string(argv[2])) * 1000;
+			temp_a = std::stoul(std::string(argv[1])) * 1000;
+			temp_b = std::stoul(std::string(argv[2])) * 1000;
 		} catch (...) {
 			print_usage();
 			exit_code = 1;
 			return;
 		}
 
-		min_temp = std::min(temp_a, temp_b);
-		max_temp = std::max(temp_a, temp_b);
+		min_temp_kelvin = mc_to_mk(std::min(temp_a, temp_b));
+		max_temp_kelvin = mc_to_mk(std::max(temp_a, temp_b));
 	}
 
 	private:
 	void print_usage() {
 		std::cerr << "Usage: " << executable << R"( TEMP TEMP
-	TEMP must be an integer in celcius between )" << std::numeric_limits<temp_t>::min() << " and " << std::numeric_limits<temp_t>::max() << R"(.
+	TEMP must be an integer in celcius between )" << std::numeric_limits<signed>::min() << " and " << std::numeric_limits<signed>::max() << R"(.
 	GPU fans will be off when GPU temp is below the lower TEMP.
 	GPU fans will be full speed when GPU temp is above the higher TEMP.
 	Fans will be proportionally controlled between those values.)" << std::endl;
@@ -105,8 +119,6 @@ class hwmon_t {
 		AUTOMATIC = 2,
 	};
 
-	typedef uint8_t pwm_t;
-
 	bool error = false;
 
 	mode_t original_mode;
@@ -163,8 +175,12 @@ class hwmon_t {
 		write(pwm_stream, pwm);
 	}
 
-	temp_t get_temp() {
-		return read<temp_t>(temp_stream);
+	signed get_temp() {
+		return read<signed>(temp_stream);
+	}
+
+	unsigned get_temp_kelvin() {
+		return mc_to_mk(get_temp());
 	}
 };
 
@@ -202,26 +218,51 @@ int main(int argc, char** argv) {
 
 	hwmon->set_mode(hwmon_t::mode_t::MANUAL);
 
+	/*
+		Common ranges:
+		temperature: roughly 270'000 to 400'000 in millikelvin.
+		control: 0 to UINT_MAX (depends on your system).
+		pwm: 0 to UINT8_MAX (255).
+	*/
+
+	const unsigned control_max = std::numeric_limits<unsigned>::max();
+
+	// Max amount to rise and fall by in each loop as a portion of control_max.
+	const unsigned rise_max = control_max * 0.01; // Rise quick enough to not overheat but slow enough to not go crazy for spikes.
+	const unsigned fall_max = control_max * 0.001; // Fall quick enough to not be quiet once cold but slow enough to not have to spin up again after a breif lull in heat.
+	// Slowing the fan for short periods of low temperature results in the fan spinning up and down frequently for varying loads which can sound irritating.
+
 	while (true) {
-		signed temp = hwmon->get_temp();
+		unsigned temp = hwmon->get_temp_kelvin();
 
-		temp_t max_pwm = std::numeric_limits<hwmon_t::pwm_t>::max();
+		unsigned temp_range = args.max_temp_kelvin - args.min_temp_kelvin;
+		unsigned temp_relative = satarith::subtract(temp, args.min_temp_kelvin); // Temperature relative to min_temp. Does not go below 0.
+		const unsigned multiplier = control_max / temp_range;
+		unsigned control_raw = satarith::multiply(temp_relative, multiplier); // fan control_smoothed value if not smoothed.
 
-		// std::cout << temp << " " << args.min_temp << " " << max_pwm << " " << args.max_temp << std::endl;
-
-		temp_t range = args.max_temp - args.min_temp;
-		temp_t relative = temp - args.min_temp;
-		temp_t pwm = relative * (float)max_pwm / range;
-		if (pwm < 0) {
-			pwm = 0;
-		} else if (pwm > max_pwm) {
-			pwm = max_pwm;
+		// React to rise and fall at specific speed.
+		// This avoids fans spinning up and down frequently while still reacting to temp rise quickly.
+		static unsigned control_smoothed = control_raw;
+		if (control_raw > control_smoothed) {
+			// Limit rise speed.
+			control_smoothed = std::min(control_raw, satarith::add(control_smoothed, rise_max));
+		} else {
+			// Limit fall speed.
+			control_smoothed = std::max(control_raw, satarith::subtract(control_smoothed, fall_max));
 		}
 
-		// std::cout << temp / 1000 << "°C, " << pwm << std::endl;
+		// Convert control_smoothed range to pwm.
+		static const pwm_t pwm_max = std::numeric_limits<pwm_t>::max();
+		static const unsigned divisor = control_max / pwm_max;
+		pwm_t pwm = control_smoothed / divisor;
+
+		unsigned percentage = (pwm * 100) / pwm_max;
+
+		std::cout << mk_to_mc(temp) / 1000 << "°C " << percentage << "%" << std::endl;
 
 		hwmon->set_pwm(pwm);
 
-		std::this_thread::sleep_for(std::chrono::milliseconds(200));
+		static const unsigned interval = 200;
+		std::this_thread::sleep_for(std::chrono::milliseconds(interval));
 	}
 }

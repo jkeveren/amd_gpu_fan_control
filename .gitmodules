@@ -1,0 +1,3 @@
+[submodule "satarith"]
+	path = satarith
+	url = git@github.com:jkeveren/satarith.git
